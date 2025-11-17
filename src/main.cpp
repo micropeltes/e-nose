@@ -44,3 +44,5 @@ void loop() {
 
   delay(500); // jeda 0.5 detik
 }
+
+// ini test code untuk cek apakah udah nyambung sama GitHUB
