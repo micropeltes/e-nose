@@ -4,50 +4,41 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-LiquidCrystal_I2C lcd(0x27,20,4);
+LiquidCrystal_I2C lcd(0x27,16,2);
 
-// -------------------- WiFi & MQTT --------------------
-const char* ssid = "Cove_SIMS";
-const char* password = "lovewhereyoulive";
+const char* ssid = "POCO X7 Pro";
+const char* password = "1234567i";
 const char* mqtt_server = "broker.emqx.io";
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 
-// -------------------- Sensor Values --------------------
-int mq2 = 0;
-int mq7 = 0;
-int mq135 = 0;
+// Sensor Values
+int adc_mq135 = 0;
+int adc_mems  = 0;
 
-// -------------------- RTOS Handle --------------------
+float Vadc_mq135, Vsensor_mq135, Rs_mq135;
+float Vadc_mems;
+
+// FreeRTOS Tasks
 TaskHandle_t TaskSensorHandle;
 TaskHandle_t TaskLCDHandle;
 TaskHandle_t TaskMQTTHandle;
 
 
-// -------------------------------------------------------
 // MQTT Callback
-// -------------------------------------------------------
 void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("MQTT Msg Topic: ");
+  Serial.print("Topic: ");
   Serial.println(topic);
-
-  Serial.print("Payload: ");
-  for (int i = 0; i < length; i++) {
-    Serial.print((char)payload[i]);
-  }
-  Serial.println();
 }
 
 
-// -------------------------------------------------------
-// MQTT Reconnect
-// -------------------------------------------------------
+// Reconnect MQTT
 void reconnectMQTT() {
   while (!client.connected()) {
     Serial.println("MQTT reconnecting...");
     if (client.connect("ESP32_CLIENT_1")) {
-      client.subscribe("sensor/control", 0);  // QoS 0
+      client.subscribe("sensor/control");
       Serial.println("MQTT Connected!");
     }
     delay(500);
@@ -55,103 +46,101 @@ void reconnectMQTT() {
 }
 
 
-// -------------------------------------------------------
-// Task 1 → SENSOR (Core 0)
-// -------------------------------------------------------
+// Task Sensor (Core 0)
 void TaskSensor(void * parameter) {
-  for (;;) {
-    mq2   = analogRead(34);
-    mq7   = analogRead(35);
-    mq135 = analogRead(36);
 
-    Serial.printf("MQ2:%d  MQ7:%d  MQ135:%d\n", mq2, mq7, mq135);
+  const float VCC = 3.3;
+  const float RLOAD = 3000.0;  // 1k + 2k (ohm)
+
+  for (;;) {
+
+    // Baca ADC
+    adc_mq135 = analogRead(34);
+    adc_mems  = analogRead(35);
+
+    // MQ135 — hitung Rs
+    float Vnode_mq135 = adc_mq135 * (VCC / 4095.0);
+    Rs_mq135 = (RLOAD * ((VCC / Vnode_mq135) - 1.0)); // ohm
+    float Rs_kohm = Rs_mq135 / 1000.0; // tampilkan kΩ
+
+    // MEMS Sensor
+    Vadc_mems = adc_mems * (VCC / 4095.0);
+
+    // Debug Serial
+    Serial.printf(
+      "MQ135 ADC:%d  V:%.3fV  Rs:%.2f kΩ  | MEMS ADC:%d  V:%.2f\n",
+      adc_mq135, Vnode_mq135, Rs_kohm, adc_mems, Vadc_mems
+    );
 
     vTaskDelay(500 / portTICK_PERIOD_MS);
   }
 }
 
-
-// -------------------------------------------------------
-// Task 2 → LCD (Core 1)
-// -------------------------------------------------------
+// Task LCD (Core 1)
 void TaskLCD(void * parameter) {
   lcd.init();
   lcd.backlight();
 
   for (;;) {
-    lcd.clear();
-    lcd.setCursor(0,0); lcd.print("MQ2 : ");  lcd.print(mq2);
-    lcd.setCursor(0,1); lcd.print("MQ7 : ");  lcd.print(mq7);
-    lcd.setCursor(0,2); lcd.print("MQ135: "); lcd.print(mq135);
+    lcd.setCursor(0,0); 
+    lcd.print("MQ Rs: ");
+    lcd.print(Rs_mq135, 1);
+    lcd.print("k ");
 
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    lcd.setCursor(0,1);
+    lcd.print("MEMS: ");
+    lcd.print(Vadc_mems, 2);
+    lcd.print("V  ");
+
+    vTaskDelay(800 / portTICK_PERIOD_MS);
   }
 }
 
 
-// -------------------------------------------------------
-// Task 3 → MQTT (Core 1)
-// -------------------------------------------------------
+// Task MQTT (Core 1)
 void TaskMQTT(void * parameter) {
-
   for (;;) {
     if (!client.connected()) {
       reconnectMQTT();
     }
 
-    client.loop();   // WAJIB agar subscribe & publish bekerja
+    client.loop();
 
-    // --- Kirim data tiap 1 detik ---
-    String payload = "{\"MQ2\":" + String(mq2) +
-                     ",\"MQ7\":" + String(mq7) +
-                     ",\"MQ135\":" + String(mq135) + "}";
+    String payload = "{\"MQ135_ADC\":"+String(adc_mq135)+
+                     ",\"MQ135_Rs\":"+String(Rs_mq135,2)+
+                     ",\"MEMS_ADC\":"+String(adc_mems)+
+                     ",\"MEMS_V\":"+String(Vadc_mems,2)+"}";
 
     client.publish("sensor/gas", payload.c_str());
 
-    Serial.println("MQTT Sent: " + payload);
+    Serial.println("MQTT Payload: " + payload);
 
     vTaskDelay(1000 / portTICK_PERIOD_MS);
   }
 }
 
 
-// -------------------------------------------------------
 // SETUP
-// -------------------------------------------------------
 void setup() {
   Serial.begin(9600);
 
   pinMode(34, INPUT);
   pinMode(35, INPUT);
-  pinMode(25, INPUT);
 
-  // WiFi
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     delay(300);
   }
-  Serial.println("\nWiFi connected");
+  Serial.println("\nWiFi connected!");
 
-  // MQTT setup
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
 
-  // ------------------- Task Creation -------------------
-
-  // CORE 0 → Sensor
-  xTaskCreatePinnedToCore(
-    TaskSensor, "TaskSensor", 4096, NULL, 1, &TaskSensorHandle, 0);
-
-  // CORE 1 → LCD
-  xTaskCreatePinnedToCore(
-    TaskLCD, "TaskLCD", 4096, NULL, 1, &TaskLCDHandle, 1);
-
-  // CORE 1 → MQTT
-  xTaskCreatePinnedToCore(
-    TaskMQTT, "TaskMQTT", 4096, NULL, 1, &TaskMQTTHandle, 1);
+  xTaskCreatePinnedToCore(TaskSensor, "TaskSensor", 4096, NULL, 1, &TaskSensorHandle, 0);
+  xTaskCreatePinnedToCore(TaskLCD, "TaskLCD", 4096, NULL, 1, &TaskLCDHandle, 1);
+  xTaskCreatePinnedToCore(TaskMQTT, "TaskMQTT", 4096, NULL, 1, &TaskMQTTHandle, 1);
 }
 
-void loop() {
-  // Kosong → semua di-handle oleh RTOS
-}
+
+void loop() {}
