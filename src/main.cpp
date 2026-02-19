@@ -156,10 +156,38 @@ void setup() {
   client.setServer(mqtt_server, 1883);
   client.setCallback(callback);
 
-  xTaskCreatePinnedToCore(TaskSensor, "TaskSensor", 4096, NULL, 1, &TaskSensorHandle, 0);
-  xTaskCreatePinnedToCore(TaskLCD, "TaskLCD", 4096, NULL, 1, &TaskLCDHandle, 1);
-  xTaskCreatePinnedToCore(TaskMQTT, "TaskMQTT", 4096, NULL, 1, &TaskMQTTHandle, 1);
-}
+  // ESP32S
+  // xTaskCreatePinnedToCore(TaskSensor, "TaskSensor", 4096, NULL, 1, &TaskSensorHandle, 0);
+  // xTaskCreatePinnedToCore(TaskLCD, "TaskLCD", 4096, NULL, 1, &TaskLCDHandle, 1);
+  // xTaskCreatePinnedToCore(TaskMQTT, "TaskMQTT", 4096, NULL, 1, &TaskMQTTHandle, 1);
+  
+  // ESP32C3
+  xTaskCreate(
+      TaskSensor,        // function
+      "TaskSensor",      // task name
+      4096,              // stack size
+      NULL,              // parameter
+      2,                 // priority (lebih tinggi)
+      &TaskSensorHandle  // task handle
+  );
 
+  xTaskCreate(
+      TaskLCD,
+      "TaskLCD",
+      4096,
+      NULL,
+      1,
+      &TaskLCDHandle
+  );
+  
+  xTaskCreate(
+      TaskMQTT,
+      "TaskMQTT",
+      4096,
+      NULL,
+      1,
+      &TaskMQTTHandle
+  );
+}
 
 void loop() {}
