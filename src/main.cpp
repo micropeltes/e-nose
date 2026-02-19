@@ -3,6 +3,17 @@
 #include <PubSubClient.h>
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <Adafruit_ADS1X15.h>
+
+// ===== I2C CONFIG =====
+//ESP32C3
+#define I2C_SDA  8
+#define I2C_SCL  9
+
+//esp32S
+// #define I2C_SDA  21
+// #define I2C_SCL  22
+Adafruit_ADS1115 ads;
 
 LiquidCrystal_I2C lcd(0x27,16,2);
 
@@ -49,32 +60,32 @@ void reconnectMQTT() {
 // Task Sensor (Core 0)
 void TaskSensor(void * parameter) {
 
-  const float VCC = 3.3;
-  const float RLOAD = 3000.0;  // 1k + 2k (ohm)
+  const float RLOAD = 3000.0;
+  const float VCC = 4.096;  // sesuai GAIN_ONE
 
   for (;;) {
 
-    // Baca ADC
-    adc_mq135 = analogRead(34);
-    adc_mems  = analogRead(35);
+    int16_t raw_h2s  = ads.readADC_SingleEnded(0);
+    int16_t raw_mq135 = ads.readADC_SingleEnded(1);
+    int16_t raw_nh3  = ads.readADC_SingleEnded(2);
 
-    // MQ135 — hitung Rs
-    float Vnode_mq135 = adc_mq135 * (VCC / 4095.0);
-    Rs_mq135 = (RLOAD * ((VCC / Vnode_mq135) - 1.0)); // ohm
-    float Rs_kohm = Rs_mq135 / 1000.0; // tampilkan kΩ
+    float V_h2s  = ads.computeVolts(raw_h2s);
+    float V_mq135 = ads.computeVolts(raw_mq135);
+    float V_nh3  = ads.computeVolts(raw_nh3);
 
-    // MEMS Sensor
-    Vadc_mems = adc_mems * (VCC / 4095.0);
+    // Hitung Rs MQ135
+    Rs_mq135 = RLOAD * ((VCC / V_mq135) - 1.0);
+    float Rs_kohm = Rs_mq135 / 1000.0;
 
-    // Debug Serial
     Serial.printf(
-      "MQ135 ADC:%d  V:%.3fV  Rs:%.2f kΩ  | MEMS ADC:%d  V:%.2f\n",
-      adc_mq135, Vnode_mq135, Rs_kohm, adc_mems, Vadc_mems
+      "H2S: %.3fV | MQ135: %.3fV Rs: %.2fkΩ | NH3: %.3fV\n",
+      V_h2s, V_mq135, Rs_kohm, V_nh3
     );
 
     vTaskDelay(500 / portTICK_PERIOD_MS);
   }
 }
+
 
 // Task LCD (Core 1)
 void TaskLCD(void * parameter) {
@@ -123,9 +134,17 @@ void TaskMQTT(void * parameter) {
 // SETUP
 void setup() {
   Serial.begin(9600);
+  Wire.begin(I2C_SDA, I2C_SCL);
+  
+  if (!ads.begin()) {
+    Serial.println("ADS1115 tidak terdeteksi!");
+    while (1);
+  }
+  
+  ads.setGain(GAIN_ONE);  // ±4.096V range (default aman)
 
-  pinMode(34, INPUT);
-  pinMode(35, INPUT);
+  // pinMode(34, INPUT);
+  // pinMode(35, INPUT);
 
   WiFi.begin(ssid, password);
   while (WiFi.status() != WL_CONNECTED) {
