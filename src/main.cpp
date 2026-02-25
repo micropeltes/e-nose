@@ -135,7 +135,7 @@ void TaskMQTT(void * parameter) {
 void setup() {
   Serial.begin(9600);
   Wire.begin(I2C_SDA, I2C_SCL);
-  
+  Serial.println("TEST");
   if (!ads.begin()) {
     Serial.println("ADS1115 tidak terdeteksi!");
     while (1);
