@@ -1,146 +1,63 @@
 #include <Arduino.h>
-#include <WiFi.h>
-#include <PubSubClient.h>
 #include <Wire.h>
+#include <Adafruit_ADS1X15.h>
 #include <LiquidCrystal_I2C.h>
 
-LiquidCrystal_I2C lcd(0x27,16,2);
+// I2C defines
+Adafruit_ADS1115 ads1;
+Adafruit_ADS1115 ads2;
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-const char* ssid = "POCO X7 Pro";
-const char* password = "1234567i";
-const char* mqtt_server = "broker.emqx.io";
+void setup() {
+  Serial.begin(115200);
+  Wire.begin();
 
-WiFiClient espClient;
-PubSubClient client(espClient);
-
-// Sensor Values
-int adc_mq135 = 0;
-int adc_mems  = 0;
-
-float Vadc_mq135, Vsensor_mq135, Rs_mq135;
-float Vadc_mems;
-
-// FreeRTOS Tasks
-TaskHandle_t TaskSensorHandle;
-TaskHandle_t TaskLCDHandle;
-TaskHandle_t TaskMQTTHandle;
-
-
-// MQTT Callback
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Topic: ");
-  Serial.println(topic);
-}
-
-
-// Reconnect MQTT
-void reconnectMQTT() {
-  while (!client.connected()) {
-    Serial.println("MQTT reconnecting...");
-    if (client.connect("ESP32_CLIENT_1")) {
-      client.subscribe("sensor/control");
-      Serial.println("MQTT Connected!");
-    }
-    delay(500);
-  }
-}
-
-
-// Task Sensor (Core 0)
-void TaskSensor(void * parameter) {
-
-  const float VCC = 3.3;
-  const float RLOAD = 3000.0;  // 1k + 2k (ohm)
-
-  for (;;) {
-
-    // Baca ADC
-    adc_mq135 = analogRead(34);
-    adc_mems  = analogRead(35);
-
-    // MQ135 — hitung Rs
-    float Vnode_mq135 = adc_mq135 * (VCC / 4095.0);
-    Rs_mq135 = (RLOAD * ((VCC / Vnode_mq135) - 1.0)); // ohm
-    float Rs_kohm = Rs_mq135 / 1000.0; // tampilkan kΩ
-
-    // MEMS Sensor
-    Vadc_mems = adc_mems * (VCC / 4095.0);
-
-    // Debug Serial
-    Serial.printf(
-      "MQ135 ADC:%d  V:%.3fV  Rs:%.2f kΩ  | MEMS ADC:%d  V:%.2f\n",
-      adc_mq135, Vnode_mq135, Rs_kohm, adc_mems, Vadc_mems
-    );
-
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-  }
-}
-
-// Task LCD (Core 1)
-void TaskLCD(void * parameter) {
   lcd.init();
   lcd.backlight();
 
-  for (;;) {
-    lcd.setCursor(0,0); 
-    lcd.print("MQ Rs: ");
-    lcd.print(Rs_mq135, 1);
-    lcd.print("k ");
+  // ADS1 ADDR -> GND mq135 dan mems h2s
+  lcd.setCursor(0,0);
+  if (!ads1.begin(0x48)) {
+    lcd.setCursor(0,0);
+    lcd.print("ADS1 gagal");
+    while (1);
+  }
+  else{
 
+  }
+
+  // ADS2 ADDR -> SDA mems nh3 dan mics 6814
+  if (!ads2.begin(0x4A)) {
     lcd.setCursor(0,1);
-    lcd.print("MEMS: ");
-    lcd.print(Vadc_mems, 2);
-    lcd.print("V  ");
-
-    vTaskDelay(800 / portTICK_PERIOD_MS);
+    lcd.print("ADS2 gagal");
+    while (1);
   }
+
+  lcd.setCursor(0,0);
+  lcd.print("ADS1115 Ready");
+  delay(2000);
+  lcd.clear();    
 }
 
+void loop() {
 
-// Task MQTT (Core 1)
-void TaskMQTT(void * parameter) {
-  for (;;) {
-    if (!client.connected()) {
-      reconnectMQTT();
-    }
+  // ADS1
+  int16_t adc1_0 = ads1.readADC_SingleEnded(0);
+  int16_t adc1_1 = ads1.readADC_SingleEnded(1);
+  int16_t adc1_2 = ads1.readADC_SingleEnded(2);
+  int16_t adc1_3 = ads1.readADC_SingleEnded(3);
+  // ADS2
+  int16_t adc2_0 = ads2.readADC_SingleEnded(0);
+  int16_t adc2_1 = ads2.readADC_SingleEnded(1);
+  int16_t adc2_2 = ads2.readADC_SingleEnded(2);
+  int16_t adc2_3 = ads2.readADC_SingleEnded(3);
 
-    client.loop();
+  Serial.print("ADS1 CH0: "); Serial.print(adc1_0);
+  Serial.print(" | CH1: "); Serial.print(adc1_0);
 
-    String payload = "{\"MQ135_ADC\":"+String(adc_mq135)+
-                     ",\"MQ135_Rs\":"+String(Rs_mq135,2)+
-                     ",\"MEMS_ADC\":"+String(adc_mems)+
-                     ",\"MEMS_V\":"+String(Vadc_mems,2)+"}";
+  Serial.print(" || ADS2 CH0: "); Serial.print(adc1_0);
+  Serial.print(" | CH1: "); Serial.println(adc1_0);
 
-    client.publish("sensor/gas", payload.c_str());
-
-    Serial.println("MQTT Payload: " + payload);
-
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
-  }
+  delay(1000);
 }
-
-
-// SETUP
-void setup() {
-  Serial.begin(9600);
-
-  pinMode(34, INPUT);
-  pinMode(35, INPUT);
-
-  WiFi.begin(ssid, password);
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(300);
-  }
-  Serial.println("\nWiFi connected!");
-
-  client.setServer(mqtt_server, 1883);
-  client.setCallback(callback);
-
-  xTaskCreatePinnedToCore(TaskSensor, "TaskSensor", 4096, NULL, 1, &TaskSensorHandle, 0);
-  xTaskCreatePinnedToCore(TaskLCD, "TaskLCD", 4096, NULL, 1, &TaskLCDHandle, 1);
-  xTaskCreatePinnedToCore(TaskMQTT, "TaskMQTT", 4096, NULL, 1, &TaskMQTTHandle, 1);
-}
-
-
-void loop() {}
