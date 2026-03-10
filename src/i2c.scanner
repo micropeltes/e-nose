@@ -1,0 +1,45 @@
+#include <Arduino.h>
+#include <Wire.h>
+
+// ===== GANTI sesuai board =====
+#define I2C_SDA 8
+#define I2C_SCL 9
+
+void setup() {
+  delay(2000);                 // beri waktu USB enumerate (C3 native USB)
+  Serial.begin(115200);
+  Serial.println("\nI2C Scanner");
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(100000);       // 100kHz standard mode
+}
+
+void loop() {
+  byte error, address;
+  int deviceCount = 0;
+
+  Serial.println("Scanning...");
+
+  for (address = 1; address < 127; address++) {
+    Wire.beginTransmission(address);
+    error = Wire.endTransmission();
+
+    if (error == 0) {
+      Serial.print("Device ditemukan di 0x");
+      if (address < 16) Serial.print("0");
+      Serial.println(address, HEX);
+      deviceCount++;
+    }
+    else if (error == 4) {
+      Serial.print("Unknown error di 0x");
+      Serial.println(address, HEX);
+    }
+  }
+
+  if (deviceCount == 0)
+    Serial.println("Tidak ada device I2C ditemukan\n");
+  else
+    Serial.println("Scan selesai\n");
+
+  delay(5000);  // ulang setiap 5 detik
+}
