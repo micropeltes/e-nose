@@ -1,3 +1,11 @@
+USB DRIVER 
+-DARDUINO_USB_MODE=0
+-DARDUINO_USB_CDC_ON_BOOT=0
+
+ CLS
+build_flags =
+    -DARDUINO_USB_MODE=1
+    -DARDUINO_USB_CDC_ON_BOOT=1
 #include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
