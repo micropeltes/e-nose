@@ -1,9 +1,11 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <Adafruit_ADS1X15.h>
 #include <LiquidCrystal_I2C.h>
+#include "mqtt_ca_cert.h"
 
 // I2C
 Adafruit_ADS1115 ads1;
@@ -15,13 +17,16 @@ LiquidCrystal_I2C lcd2(0x20, 16, 2);
 // ADC values
 int16_t adc1_0, adc1_1, adc1_2, adc1_3;
 int16_t adc2_0, adc2_1, adc2_2, adc2_3;
+bool ads1Ok = false;
+bool ads2Ok = false;
 
 // WIFI + MQTT
 const char* ssid = "POCO X7 Pro";
 const char* password = "1234567i";
-const char* mqtt_server = "broker.emqx.io";
+const char* mqtt_server = "45.126.43.35";
+const uint16_t mqtt_port = 8883;
 
-WiFiClient espClient;
+WiFiClientSecure espClient;
 PubSubClient client(espClient);
 
 TaskHandle_t TaskSensorHandle;
@@ -73,15 +78,29 @@ void TaskSensor(void * parameter) {
 
   for (;;) {
 
-    adc1_0 = ads1.readADC_SingleEnded(0);
-    adc1_1 = ads1.readADC_SingleEnded(1);
-    adc1_2 = ads1.readADC_SingleEnded(2);
-    adc1_3 = ads1.readADC_SingleEnded(3);
+    if (ads1Ok) {
+      adc1_0 = ads1.readADC_SingleEnded(0);
+      adc1_1 = ads1.readADC_SingleEnded(1);
+      adc1_2 = ads1.readADC_SingleEnded(2);
+      adc1_3 = ads1.readADC_SingleEnded(3);
+    } else {
+      adc1_0 = -1;
+      adc1_1 = -1;
+      adc1_2 = -1;
+      adc1_3 = -1;
+    }
 
-    adc2_0 = ads2.readADC_SingleEnded(0);
-    adc2_1 = ads2.readADC_SingleEnded(1);
-    adc2_2 = ads2.readADC_SingleEnded(2);
-    adc2_3 = ads2.readADC_SingleEnded(3);
+    if (ads2Ok) {
+      adc2_0 = ads2.readADC_SingleEnded(0);
+      adc2_1 = ads2.readADC_SingleEnded(1);
+      adc2_2 = ads2.readADC_SingleEnded(2);
+      adc2_3 = ads2.readADC_SingleEnded(3);
+    } else {
+      adc2_0 = -1;
+      adc2_1 = -1;
+      adc2_2 = -1;
+      adc2_3 = -1;
+    }
 
     vTaskDelay(500 / portTICK_PERIOD_MS);
   }
@@ -107,6 +126,8 @@ void TaskMQTT(void * parameter) {
     ",\"adc6\":"+String(adc2_1)+
     ",\"adc7\":"+String(adc2_2)+
     ",\"adc8\":"+String(adc2_3)+
+    ",\"ads1_status\":\""+String(ads1Ok ? "ok" : "error")+"\""+
+    ",\"ads2_status\":\""+String(ads2Ok ? "ok" : "error")+"\""+
     "}";
 
     client.publish("sensor/gas", payload.c_str());
@@ -170,20 +191,21 @@ void setup() {
   lcd2.init();
   lcd2.backlight();
 
-  if (!ads1.begin(0x48)) {
+  ads1Ok = ads1.begin(0x48);
+  if (!ads1Ok) {
     lcd1.print("ADS1 ERROR");
-    while(1);
   }
 
-  if (!ads2.begin(0x4A)) {
+  ads2Ok = ads2.begin(0x4A);
+  if (!ads2Ok) {
     lcd1.setCursor(0,1);
     lcd1.print("ADS2 ERROR");
-    while(1);
   }
 
   connectWiFi();
 
-  client.setServer(mqtt_server, 1883);
+  espClient.setCACert(MQTT_CA_CERT);
+  client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
 
   // CREATE TASKS
