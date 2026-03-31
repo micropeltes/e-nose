@@ -118,7 +118,8 @@ void TaskMQTT(void * parameter) {
     client.loop();
 
     String payload = "{"
-    "\"adc1\":"+String(adc1_0)+
+    "\"devid\":"+String("ESP-00")+
+    ",\"adc1\":"+String(adc1_0)+
     ",\"adc2\":"+String(adc1_1)+
     ",\"adc3\":"+String(adc1_2)+
     ",\"adc4\":"+String(adc1_3)+
