@@ -118,15 +118,13 @@ void TaskMQTT(void * parameter) {
     client.loop();
 
     String payload = "{"
-    "\"devid\":"+String("ESP-00")+
-    ",\"adc1\":"+String(adc1_0)+
-    ",\"adc2\":"+String(adc1_1)+
-    ",\"adc3\":"+String(adc1_2)+
-    ",\"adc4\":"+String(adc1_3)+
-    ",\"adc5\":"+String(adc2_0)+
-    ",\"adc6\":"+String(adc2_1)+
-    ",\"adc7\":"+String(adc2_2)+
-    ",\"adc8\":"+String(adc2_3)+
+    "\"devid\":\"ESP-00\""+
+    ",\"nh3_mics\":"+String(adc1_1)+
+    ",\"nh3_mems\":"+String(adc2_3)+
+    ",\"h2s\":"+String(adc2_2)+
+    ",\"no2\":"+String(adc1_0)+
+    ",\"co\":"+String(adc1_2)+
+    ",\"mq135\":"+String(adc1_3)+
     ",\"ads1_status\":\""+String(ads1Ok ? "ok" : "error")+"\""+
     ",\"ads2_status\":\""+String(ads2Ok ? "ok" : "error")+"\""+
     "}";
