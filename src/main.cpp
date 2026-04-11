@@ -4,76 +4,140 @@
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
 #include <Adafruit_ADS1X15.h>
-#include <LiquidCrystal_I2C.h>
+#include <time.h>
+#include <stdlib.h>
+#include <string.h>
 #include "mqtt_ca_cert.h"
 
 // I2C
+constexpr uint8_t I2C_SDA_PIN = 10;
+constexpr uint8_t I2C_SCL_PIN = 6;
 Adafruit_ADS1115 ads1;
-Adafruit_ADS1115 ads2;
-
-LiquidCrystal_I2C lcd1(0x27, 16, 2);
-LiquidCrystal_I2C lcd2(0x20, 16, 2);
 
 // ADC values
 int16_t adc1_0, adc1_1, adc1_2, adc1_3;
-int16_t adc2_0, adc2_1, adc2_2, adc2_3;
 bool ads1Ok = false;
-bool ads2Ok = false;
 
 // WIFI + MQTT
 const char* ssid = "POCO X7 Pro";
 const char* password = "1234567i";
 const char* mqtt_server = "45.126.43.35";
 const uint16_t mqtt_port = 8883;
+const char* mqtt_pub_topic = "test/topic";
+const char* mqtt_err_topic = "sensor/errorlog";
+const char* mqtt_interval_sub_topic = "sensor/control";
+constexpr uint32_t MQTT_INTERVAL_MIN_MS = 200;
+constexpr uint32_t MQTT_INTERVAL_MAX_MS = 60000;
+volatile uint32_t mqttPublishIntervalMs = 1000;
 
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
 
+// TASK HANDLE
 TaskHandle_t TaskSensorHandle;
 TaskHandle_t TaskMQTTHandle;
-TaskHandle_t TaskLCDHandle;
 
-void callback(char* topic, byte* payload, unsigned int length) {
-  Serial.print("Topic: ");
-  Serial.println(topic);
+void publishErrorLog(const char* msg) {
+  if (!client.connected()) return;
+  client.publish(mqtt_err_topic, msg);
 }
 
-// WIFI CONNECT
-void connectWiFi() {
+bool parseIntervalFromPayload(const byte* payload, unsigned int length, uint32_t& outMs) {
+  char msg[64];
+  unsigned int copyLen = (length < sizeof(msg) - 1) ? length : (sizeof(msg) - 1);
+  memcpy(msg, payload, copyLen);
+  msg[copyLen] = '\0';
 
+  char* p = msg;
+  while (*p != '\0' && (*p < '0' || *p > '9')) {
+    p++;
+  }
+  if (*p == '\0') {
+    return false;
+  }
+
+  char* endPtr = nullptr;
+  unsigned long value = strtoul(p, &endPtr, 10);
+  if (endPtr == p) {
+    return false;
+  }
+
+  if (value < MQTT_INTERVAL_MIN_MS || value > MQTT_INTERVAL_MAX_MS) {
+    return false;
+  }
+
+  outMs = static_cast<uint32_t>(value);
+  return true;
+}
+
+void handleIntervalConfigMessage(const byte* payload, unsigned int length) {
+  uint32_t newIntervalMs = 0;
+  if (parseIntervalFromPayload(payload, length, newIntervalMs)) {
+    mqttPublishIntervalMs = newIntervalMs;
+    Serial.print("MQTT interval updated to ");
+    Serial.print(mqttPublishIntervalMs);
+    Serial.println(" ms");
+  } else {
+    Serial.print("Invalid interval payload. Use ");
+    Serial.print(MQTT_INTERVAL_MIN_MS);
+    Serial.print("..");
+    Serial.print(MQTT_INTERVAL_MAX_MS);
+    Serial.println(" (ms)");
+    publishErrorLog("Invalid interval payload");
+  }
+}
+
+// CALLBACK MQTT
+void callback(char* topic, byte* payload, unsigned int length) {
+  Serial.print("Message on: ");
+  Serial.println(topic);
+
+  if (strcmp(topic, mqtt_interval_sub_topic) == 0) {
+    handleIntervalConfigMessage(payload, length);
+  }
+}
+
+// ================= WIFI =================
+void connectWiFi() {
   WiFi.begin(ssid, password);
 
   Serial.print("Connecting WiFi");
-
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     delay(500);
   }
-
   Serial.println("\nWiFi Connected");
 }
 
-// MQTT RECONNECT
-void reconnectMQTT() {
-
-  while (!client.connected()) {
-
-    Serial.println("MQTT reconnecting...");
-
-    if (client.connect("ESP32C3_CLIENT")) {
-
-      client.subscribe("sensor/control");
-
-      Serial.println("MQTT Connected");
-
-    } else {
-
-      vTaskDelay(500 / portTICK_PERIOD_MS);
+// ================= I2C SCAN =================
+void scanI2C() {
+  Serial.println("Scanning I2C...");
+  for (byte i = 1; i < 127; i++) {
+    Wire.beginTransmission(i);
+    if (Wire.endTransmission() == 0) {
+      Serial.print("Found device at 0x");
+      Serial.println(i, HEX);
     }
   }
 }
 
-// SENSOR TASK
+// ================= MQTT RECONNECT (NON BLOCKING) =================
+void reconnectMQTT() {
+
+  if (client.connected()) return;
+
+  Serial.println("MQTT reconnecting...");
+
+  if (client.connect("ESP32C3_CLIENT")) {
+    Serial.println("MQTT Connected");
+    client.subscribe(mqtt_interval_sub_topic);
+  } else {
+    Serial.print("MQTT Failed, rc=");
+    Serial.println(client.state());
+  }
+}
+
+// ================= TASK SENSOR =================
 void TaskSensor(void * parameter) {
 
   for (;;) {
@@ -90,150 +154,79 @@ void TaskSensor(void * parameter) {
       adc1_3 = -1;
     }
 
-    if (ads2Ok) {
-      adc2_0 = ads2.readADC_SingleEnded(0);
-      adc2_1 = ads2.readADC_SingleEnded(1);
-      adc2_2 = ads2.readADC_SingleEnded(2);
-      adc2_3 = ads2.readADC_SingleEnded(3);
-    } else {
-      adc2_0 = -1;
-      adc2_1 = -1;
-      adc2_2 = -1;
-      adc2_3 = -1;
-    }
-
     vTaskDelay(500 / portTICK_PERIOD_MS);
   }
 }
 
-// MQTT TASK
+// ================= TASK MQTT =================
 void TaskMQTT(void * parameter) {
+
+  char payload[256];
 
   for (;;) {
 
-    if (!client.connected()) {
-      reconnectMQTT();
-    }
-
+    reconnectMQTT();
     client.loop();
 
-    String payload = "{"
-    "\"devid\":\"ESP-00\""+
-    ",\"nh3_mics\":"+String(adc1_1)+
-    ",\"nh3_mems\":"+String(adc2_3)+
-    ",\"h2s\":"+String(adc2_2)+
-    ",\"no2\":"+String(adc1_0)+
-    ",\"co\":"+String(adc1_2)+
-    ",\"mq135\":"+String(adc1_3)+
-    ",\"ads1_status\":\""+String(ads1Ok ? "ok" : "error")+"\""+
-    ",\"ads2_status\":\""+String(ads2Ok ? "ok" : "error")+"\""+
-    "}";
+    snprintf(payload, sizeof(payload),
+      "{\"devid\":\"esp32-002\",\"nh3_mics\":8500,\"nh3_mems\":8700,\"h2s\":9100,\"no2\":7600,\"co\":10200,\"mq135\":9500}");
 
-    client.publish("sensor/gas", payload.c_str());
+    if (client.connected()) {
+
+      bool ok = client.publish(mqtt_pub_topic, payload);
+
+      if (!ok) {
+        Serial.println("Publish gagal -> sensor/errorlog");
+        publishErrorLog("Publish sensor payload gagal");
+        client.publish(mqtt_err_topic, payload);
+      }
+
+    } else {
+      Serial.println("MQTT tidak connected");
+    }
 
     Serial.println(payload);
 
-    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    vTaskDelay(mqttPublishIntervalMs / portTICK_PERIOD_MS);
   }
 }
 
-// LCD TASK
-void TaskLCD(void * parameter) {
-
-  for (;;) {
-
-    lcd1.setCursor(0,0);
-    lcd1.print("A1:");
-    lcd1.print(adc1_0);
-    
-    lcd1.setCursor(0,1);
-    lcd1.print("A2:");
-    lcd1.print(adc1_1);
-    
-    lcd1.setCursor(8,0);
-    lcd1.print("A3:");
-    lcd1.print(adc1_2);
-      
-    lcd1.setCursor(8,1);
-    lcd1.print("A4:");
-    lcd1.print(adc1_3);
-    
-    lcd2.setCursor(0,0);
-    lcd2.print("A5:");
-    lcd2.print(adc2_0);
-    
-    lcd2.setCursor(0,1);
-    lcd2.print("A6:");
-    lcd2.print(adc2_1);
-    
-    lcd2.setCursor(8,0);
-    lcd2.print("A7:");
-    lcd2.print(adc2_2);
-    
-    lcd2.setCursor(8,1);
-    lcd2.print("A8:");
-    lcd2.print(adc2_3);
-    vTaskDelay(500 / portTICK_PERIOD_MS);
-  }
-}
-
-// SETUP
+// ================= SETUP =================
 void setup() {
 
   Serial.begin(115200);
+  Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN);
 
-  Wire.begin();
-
-  lcd1.init();
-  lcd1.backlight();
-
-  lcd2.init();
-  lcd2.backlight();
+  scanI2C();
 
   ads1Ok = ads1.begin(0x48);
   if (!ads1Ok) {
-    lcd1.print("ADS1 ERROR");
-  }
-
-  ads2Ok = ads2.begin(0x4A);
-  if (!ads2Ok) {
-    lcd1.setCursor(0,1);
-    lcd1.print("ADS2 ERROR");
+    Serial.println("ADS1115 NOT DETECTED");
   }
 
   connectWiFi();
 
-  espClient.setCACert(MQTT_CA_CERT);
+  // ================= SYNC WAKTU (WAJIB UNTUK TLS) =================
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  Serial.print("Sync time");
+  time_t now = time(nullptr);
+  while (now < 100000) {
+    delay(500);
+    Serial.print(".");
+    now = time(nullptr);
+  }
+  Serial.println(" OK");
+
+  // ================= TLS CONFIG =================
+  espClient.setInsecure();
+
   client.setServer(mqtt_server, mqtt_port);
   client.setCallback(callback);
 
-  // CREATE TASKS
-  xTaskCreate(
-    TaskSensor,
-    "SensorTask",
-    4096,
-    NULL,
-    1,
-    &TaskSensorHandle
-  );
-
-  xTaskCreate(
-    TaskMQTT,
-    "MQTTTask",
-    4096,
-    NULL,
-    1,
-    &TaskMQTTHandle
-  );
-
-  xTaskCreate(
-    TaskLCD,
-    "LCDTask",
-    2048,
-    NULL,
-    1,
-    &TaskLCDHandle
-  );
+  // ================= TASK =================
+  xTaskCreate(TaskSensor, "SensorTask", 4096, NULL, 1, &TaskSensorHandle);
+  xTaskCreate(TaskMQTT, "MQTTTask", 4096, NULL, 1, &TaskMQTTHandle);
 }
 
 void loop() {
