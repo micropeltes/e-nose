@@ -10,6 +10,8 @@
 #include "credentials.h"
 
 // ================= CONFIG =================
+constexpr char DEVICE_ID[] = "ESP-00";
+
 constexpr uint8_t I2C_SDA_PIN = 10;
 constexpr uint8_t I2C_SCL_PIN = 6;
 constexpr uint32_t I2C_CLOCK_HZ = 100000;
@@ -23,7 +25,6 @@ constexpr uint8_t ADS_ADDR_SDA_SHORT = 0x4A;
 constexpr uint8_t ADS_INIT_RETRY_COUNT = 5;
 constexpr uint32_t ADS_INIT_RETRY_DELAY_MS = 500;
 constexpr uint32_t SENSOR_READ_INTERVAL_MS = 500;
-constexpr size_t SENSOR_SAMPLE_QUEUE_SIZE = 8;
 constexpr adsGain_t ADS_GAIN = GAIN_ONE;  // +/-4.096V, aman untuk sinyal sensor 3.3V.
 
 constexpr char MQTT_DATA_TOPIC[] = "device/data";
@@ -54,17 +55,10 @@ struct AdsState {
   bool micsOk = false;
 };
 
-struct SensorSample {
-  SensorReadings readings;
-  time_t timestamp = 0;
-};
-
-SensorSample sensorSampleQueue[SENSOR_SAMPLE_QUEUE_SIZE];
-size_t sensorSampleHead = 0;
-size_t sensorSampleCount = 0;
+SensorReadings readings;
 AdsState adsState;
 volatile uint32_t mqttPublishIntervalMs = MQTT_INTERVAL_DEFAULT_MS;
-SemaphoreHandle_t sensorSampleQueueMutex = nullptr;
+SemaphoreHandle_t readingsMutex = nullptr;
 
 char errorLogQueue[ERROR_LOG_QUEUE_SIZE][ERROR_LOG_MAX_LEN];
 size_t errorLogHead = 0;
@@ -79,6 +73,9 @@ Adafruit_ADS1115 adsMicsMq135;  // ADDR short ke SDA / 0x4A: MQ135 + MICS.
 
 WiFiClientSecure espClient;
 PubSubClient client(espClient);
+
+TaskHandle_t TaskSensorHandle;
+TaskHandle_t TaskMQTTHandle;
 
 // ================= ERROR LOG =================
 void enqueueErrorLog(const char* payload) {
@@ -133,55 +130,25 @@ void flushErrorLogs() {
   }
 }
 
-void pushSensorSample(SensorSample& sample) {
-  size_t writeIndex = (sensorSampleHead + sensorSampleCount) % SENSOR_SAMPLE_QUEUE_SIZE;
-
-  if (sensorSampleCount == SENSOR_SAMPLE_QUEUE_SIZE) {
-    writeIndex = sensorSampleHead;
-    sensorSampleHead = (sensorSampleHead + 1) % SENSOR_SAMPLE_QUEUE_SIZE;
-  } else {
-    sensorSampleCount++;
-  }
-
-  sensorSampleQueue[writeIndex] = sample;
-}
-
-void enqueueSensorSample(const SensorReadings& nextReadings) {
-  SensorSample sample;
-  sample.readings = nextReadings;
-  sample.timestamp = time(nullptr);
-
-  if (sensorSampleQueueMutex != nullptr && xSemaphoreTake(sensorSampleQueueMutex, portMAX_DELAY) == pdTRUE) {
-    pushSensorSample(sample);
-    xSemaphoreGive(sensorSampleQueueMutex);
+void storeSensorReadings(const SensorReadings& nextReadings) {
+  if (readingsMutex != nullptr && xSemaphoreTake(readingsMutex, portMAX_DELAY) == pdTRUE) {
+    readings = nextReadings;
+    xSemaphoreGive(readingsMutex);
     return;
   }
 
-  pushSensorSample(sample);
+  readings = nextReadings;
 }
 
-bool dequeueSensorSample(SensorSample& sample) {
-  if (sensorSampleQueueMutex != nullptr && xSemaphoreTake(sensorSampleQueueMutex, portMAX_DELAY) == pdTRUE) {
-    if (sensorSampleCount == 0) {
-      xSemaphoreGive(sensorSampleQueueMutex);
-      return false;
-    }
-
-    sample = sensorSampleQueue[sensorSampleHead];
-    sensorSampleHead = (sensorSampleHead + 1) % SENSOR_SAMPLE_QUEUE_SIZE;
-    sensorSampleCount--;
-    xSemaphoreGive(sensorSampleQueueMutex);
-    return true;
+SensorReadings getSensorReadingsSnapshot() {
+  SensorReadings snapshot;
+  if (readingsMutex != nullptr && xSemaphoreTake(readingsMutex, portMAX_DELAY) == pdTRUE) {
+    snapshot = readings;
+    xSemaphoreGive(readingsMutex);
+    return snapshot;
   }
 
-  if (sensorSampleCount == 0) {
-    return false;
-  }
-
-  sample = sensorSampleQueue[sensorSampleHead];
-  sensorSampleHead = (sensorSampleHead + 1) % SENSOR_SAMPLE_QUEUE_SIZE;
-  sensorSampleCount--;
-  return true;
+  return readings;
 }
 
 // ================= MQTT CONTROL =================
@@ -426,42 +393,40 @@ void readSensors() {
   SensorReadings nextReadings;
   readMicsMq135Ads(nextReadings);
   readMemsAds(nextReadings);
-  enqueueSensorSample(nextReadings);
+  storeSensorReadings(nextReadings);
 }
 
-void buildDataPayload(char* payload, size_t payloadSize, const SensorSample& sample) {
+void buildDataPayload(char* payload, size_t payloadSize, const SensorReadings& snapshot) {
   snprintf(payload, payloadSize,
     "{\"devid\":\"%s\",\"nh3_mics\":%d,\"nh3_mems\":%d,"
     "\"h2s\":%d,\"no2\":%d,\"co\":%d,\"mq135\":%d,\"timestamp\":%ld}",
     DEVICE_ID,
-    sample.readings.nh3Mics,
-    sample.readings.nh3Mems,
-    sample.readings.h2s,
-    sample.readings.no2,
-    sample.readings.co,
-    sample.readings.mq135,
-    (long)sample.timestamp
+    snapshot.nh3Mics,
+    snapshot.nh3Mems,
+    snapshot.h2s,
+    snapshot.no2,
+    snapshot.co,
+    snapshot.mq135,
+    (long)time(nullptr)
   );
 }
 
 void publishSensorData() {
+  char payload[256];
+  SensorReadings snapshot = getSensorReadingsSnapshot();
+  buildDataPayload(payload, sizeof(payload), snapshot);
+
   if (!client.connected()) {
     logErrorThrottled("MQTT tidak connected", lastMqttOfflineLogMs);
+    Serial.println(payload);
     return;
   }
 
-  SensorSample sample;
-  while (dequeueSensorSample(sample)) {
-    char payload[256];
-    buildDataPayload(payload, sizeof(payload), sample);
-
-    if (!client.publish(MQTT_DATA_TOPIC, payload)) {
-      logErrorThrottled("Publish sensor payload gagal", lastPublishErrorLogMs);
-      return;
-    }
-
-    Serial.println(payload);
+  if (!client.publish(MQTT_DATA_TOPIC, payload)) {
+    logErrorThrottled("Publish sensor payload gagal", lastPublishErrorLogMs);
   }
+
+  Serial.println(payload);
 }
 
 // ================= TASKS =================
@@ -497,7 +462,7 @@ void TaskMQTT(void* parameter) {
 // ================= SETUP =================
 void setup() {
   Serial.begin(115200);
-  sensorSampleQueueMutex = xSemaphoreCreateMutex();
+  readingsMutex = xSemaphoreCreateMutex();
 
   beginI2C();
   connectWiFi();
@@ -509,8 +474,8 @@ void setup() {
   client.setBufferSize(384);
   client.setCallback(mqttCallback);
 
-  xTaskCreate(TaskSensor, "SensorTask", 4096, NULL, 1, nullptr);
-  xTaskCreate(TaskMQTT, "MQTTTask", 4096, NULL, 1, nullptr);
+  xTaskCreate(TaskSensor, "SensorTask", 4096, NULL, 1, &TaskSensorHandle);
+  xTaskCreate(TaskMQTT, "MQTTTask", 4096, NULL, 1, &TaskMQTTHandle);
 }
 
 void loop() {

@@ -6,3 +6,5 @@
 include/ca.cert.h
 *.cert.h
 include/mqtt_ca_cert.h
+credentials.h
+!credentials.example.h

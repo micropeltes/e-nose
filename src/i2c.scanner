@@ -1,9 +1,10 @@
 #include <Arduino.h>
 #include <Wire.h>
+#include <SPI.h>
 
 // ===== GANTI sesuai board =====
-#define I2C_SDA 8
-#define I2C_SCL 9
+#define I2C_SDA 10
+#define I2C_SCL 6
 
 void setup() {
   delay(2000);                 // beri waktu USB enumerate (C3 native USB)
